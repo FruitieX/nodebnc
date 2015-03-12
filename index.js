@@ -31,9 +31,6 @@ var sendNickList = function(socket, channel) {
         return;
     }
 
-    console.log(channel);
-    console.log(chGetCh(channel));
-    console.log(server.chans);
     var c = server.chans[chGetCh(channel)];
     if(!c) {
         socket.emit('bncErr', 'sendNickList: channel ' + channel + ' not found');
@@ -84,30 +81,34 @@ var short2ch = function(shortChName) {
 
 io.on('connection', function(socket) {
     socket.on('refreshState', function(query) {
-        Messages.find({
-            channel: { $in: getConfigChans(config) }
-        })
-        .sort('date')
-        .limit(query.limit)
+        Messages.aggregate( [
+            { $match: { channel: {$in: getConfigChans(config) } } },
+            { $sort:  { date: 1 } },
+            { $group: { _id: "$channel", messages: { $push: "$$ROOT" } } },
+            { $limit: query.limit }
+        ])
         .exec(function(err, messages) {
             if(err) {
                 socket.emit('bncErr', err);
             } else {
-                socket.emit('backlog', messages);
+                socket.emit('messages', messages);
                 sendAllNickLists(socket);
             }
         });
     });
 
-    // TODO: regex searches from db
-    socket.on('backlog', function(query) {
-        Messages.find({ channel: query.channel })
+    socket.on('search', function(query) {
+        Messages.find(_.pick(query, 'channel', 'nick', 'text'))
         .sort('date')
         .limit(query.limit)
         .exec(function(err, messages) {
             if(err) socket.emit('bncErr', err);
-            else socket.emit('backlog', messages);
+            else socket.emit('results', messages);
         });
+    });
+
+    socket.on('clientBroadcast', function(data) {
+        socket.broadcast.emit(data);
     });
 });
 

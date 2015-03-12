@@ -97,7 +97,7 @@ io.on('connection', function(socket) {
                     backlog.push(messages[i]);
 
                     cnt++;
-                    if(query && query.limit && cnt > query.limit)
+                    if(query && query.limit && cnt >= query.limit)
                         break;
                 }
             }

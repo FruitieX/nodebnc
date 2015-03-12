@@ -6,7 +6,7 @@ var _ = require('underscore');
 var fs = require('fs');
 var util = require('util');
 
-var ircConnections = {};
+var ircServers = {};
 var config = require(process.env.HOME + '/.nodebnc/config.json');
 
 // networking
@@ -24,8 +24,8 @@ var httpServer = require(config.tls ? 'https': 'http')
 .createServer(config.tls ? options: null).listen(config.port);
 var io = require('socket.io')(httpServer);
 
-var sendNickList = function(socket, channel) {
-    var server = ircConnections[chGetSv(channel)];
+var getNickList = function(channel) {
+    var server = ircServers[chGetSv(channel)];
     if(!server) {
         socket.emit('bncErr', 'sendNickList: server not found');
         return;
@@ -37,17 +37,21 @@ var sendNickList = function(socket, channel) {
         return;
     }
 
-    var nickList = c.users;
-    socket.emit('nickList', {
-        channel: channel,
-        nickList: nickList
-    });
+    return c.users;
 };
 
 var sendAllNickLists = function(socket) {
+    var nickLists = {};
+
     _.each(config.channels, function(channel) {
-        sendNickList(socket, channel);
+        nickLists[channel] = getNickList(channel);
     });
+
+    socket.emit('nickLists', nickLists);
+};
+var sendNickList = function(channel, socket) {
+    var nickList = getNickList(channel);
+    socket.emit('nickList', nickList);
 };
 
 var getConfigChans = function(config) {
@@ -110,6 +114,51 @@ io.on('connection', function(socket) {
     socket.on('clientBroadcast', function(data) {
         socket.broadcast.emit(data);
     });
+
+    socket.on('join', function(channel) {
+        var server = ircServers[chGetSv(channel)];
+        if(!server) {
+            socket.emit('bncErr', 'join: server not found');
+            return;
+        }
+
+        // TODO: check also that channel doesn't exist with key?
+        if(config.channels.indexOf(channel) === -1)
+            config.channels.push(channel);
+
+        server.join(chGetChWithKey(channel));
+    });
+
+    socket.on('part', function(channel) {
+        var server = ircServers[chGetSv(channel)];
+        if(!server) {
+            socket.emit('bncErr', 'part: server not found');
+            return;
+        }
+
+        if(config.channels.indexOf(channel) !== -1)
+            config.channels.splice(channel.channels.indexOf(channel), 1);
+
+        server.part(chGetCh(channel));
+    });
+
+    socket.on('getChannels', function() {
+        socket.emit('channels', config.channels);
+    });
+
+    socket.on('message', function(message) {
+        var server = ircServers[chGetSv(message.channel)];
+        if(!server) {
+            socket.emit('bncErr', 'part: server not found');
+            return;
+        }
+
+        message.nick = server.nick;
+        message.date = new Date().now;
+
+        io.sockets.emit('message', message);
+        server.say(chGetCh(message.channel), message.text);
+    });
 });
 
 mongoose.connect(config.mongodb);
@@ -166,12 +215,12 @@ var handleNickChange = function(oldNick, newNick, channels, svName) {
 }
 
 _.each(config.servers, function(serverConfig, svName) {
-    if(!ircConnections[svName]) {
-        ircConnections[svName] = new irc.Client(serverConfig.hostname,
+    if(!ircServers[svName]) {
+        ircServers[svName] = new irc.Client(serverConfig.hostname,
                                                 serverConfig.userName,
                                                 serverConfig);
 
-        var server = ircConnections[svName];
+        var server = ircServers[svName];
         var log = function(message) {
             console.log(svName + ': ' + message);
         };
@@ -221,26 +270,34 @@ _.each(config.servers, function(serverConfig, svName) {
 
             // we joined
             if(nick === server.nick) {
-                /*
-                config.channels[channel] = {
-                }
-                */
+            } else {
             }
+
+            sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('part', function(channel, nick, reason, message) {
             log(nick + ' left ' + channel + ': ' + JSON.stringify(message, null, 4));
+            if(nick === server.nick) {
+            } else {
+                sendNickList(svName + ':' + channel, io.sockets);
+            }
         });
         server.on('quit', function(nick, reason, channels, message) {
             log(nick + ' quit');
         });
         server.on('kick', function(channel, nick, by, reason, message) {
             log(nick + ' kicked from ' + channel);
+            sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('kill', function(nick, reason, channels, message) {
             log(nick + ' killed from server');
+            _.each(channels, function(channel) {
+                sendNickList(svName + ':' + channel, io.sockets);
+            });
         });
         server.on('names', function(channel, nicks) {
             log('names in ' + channel + ': ' + JSON.stringify(nicks, null, 4));
+            sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('topic', function(channel, topic, nick, message) {
             log('topic in ' + channel + ' changed to: ' + topic);

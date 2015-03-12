@@ -7,7 +7,8 @@ var fs = require('fs');
 var util = require('util');
 
 var ircServers = {};
-var config = require(process.env.HOME + '/.nodebnc/config.json');
+var configPath = process.env.HOME + '/.nodebnc/config.json';
+var config = require(configPath);
 
 // networking
 var options = {
@@ -126,6 +127,8 @@ io.on('connection', function(socket) {
         if(config.channels.indexOf(channel) === -1)
             config.channels.push(channel);
 
+var config = require(process.env.HOME + '/.nodebnc/config.json');
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
         server.join(chGetChWithKey(channel));
     });
 
@@ -158,6 +161,10 @@ io.on('connection', function(socket) {
 
         io.sockets.emit('message', message);
         server.say(chGetCh(message.channel), message.text);
+    });
+
+    socket.on('raw', function(data) {
+        server.send(data);
     });
 });
 
@@ -200,6 +207,29 @@ var handleMessage = function(from, to, text, svName) {
     console.log('message from ' + from + ' to ' + to + ': ' + text);
 };
 
+var handleChannelEvent = function(event, nick, argument, channel, svName) {
+    var ev = {
+        nick: nick,
+        argument: argument,
+        event: event,
+        channel: svName + ':' + channel
+    };
+    io.sockets.emit('channelEvent', ev);
+    ChannelEvents.create(ev);
+    console.log('event ' + event + ' from ' + nick + ' to ' + channel + ': ' + argument);
+};
+
+var handleGlobalEvent = function(event, nick, svName) {
+    var ev = {
+        nick: nick,
+        event: event,
+        svName: svName
+    };
+    io.sockets.emit('globalEvent', ev);
+    GlobalEvents.create(ev);
+    console.log('globalEvent ' + event + ' from ' + nick + ' to ' + svName);
+};
+
 var handleNickChange = function(oldNick, newNick, channels, svName) {
     _.each(channels, function(channel) {
         var event = {
@@ -211,34 +241,35 @@ var handleNickChange = function(oldNick, newNick, channels, svName) {
     });
 
     // TODO: check if it was you and act appropriately
-    log(oldNick + ' changed name to ' + newNick);
+    console.log(oldNick + ' changed name to ' + newNick);
+}
+
+var handleRegister = function(message, svName) {
+    console.log('registered: ' + JSON.stringify(message, null, 4));
+    io.sockets.emit('registered', {
+        "name": svName,
+        "message": message
+    });
+
+    // autojoin channels
+    var svChans = _.filter(config.channels, function(channel) {
+        return (chGetSv(channel) === svName);
+    });
+    _.each(svChans, function(channel) {
+        ircServers[svName].join(chGetChWithKey(channel));
+    });
 }
 
 _.each(config.servers, function(serverConfig, svName) {
     if(!ircServers[svName]) {
         ircServers[svName] = new irc.Client(serverConfig.hostname,
-                                                serverConfig.userName,
-                                                serverConfig);
+                                            serverConfig.userName,
+                                            serverConfig);
 
         var server = ircServers[svName];
-        var log = function(message) {
-            console.log(svName + ': ' + message);
-        };
 
         server.on('registered', function(message) {
-            log('registered: ' + JSON.stringify(message, null, 4));
-            io.sockets.emit('registered', {
-                "name": svName,
-                "message": message
-            });
-
-            // autojoin channels
-            var svChans = _.filter(config.channels, function(channel) {
-                return (chGetSv(channel) === svName);
-            });
-            _.each(svChans, function(channel) {
-                server.join(chGetChWithKey(channel));
-            });
+            handleRegister(message, svName);
         });
         server.on('message', function(from, to, text, message) {
             handleMessage(from, to, text, svName);
@@ -250,62 +281,65 @@ _.each(config.servers, function(serverConfig, svName) {
             handleNickChange(oldnick, newnick, channels, svName);
         });
         server.on('invite', function(channel, from, message) {
-            log('got invited to ' + channel + ' by ' + from);
+            handleGlobalEvent('invite', from, svName);
         });
         server.on('+mode', function(channel, by, mode, argument, message) {
-            log(channel + ': +' + mode + ' by ' + by + ': ' + argument);
+            handleChannelEvent('+mode', by, JSON.stringify({
+                target: argument,
+                mode: mode
+            }), channel, svName);
         });
         server.on('-mode', function(channel, by, mode, argument, message) {
-            log(channel + ': -' + mode + ' by ' + by + ': ' + argument);
+            handleChannelEvent('-mode', by, JSON.stringify({
+                target: argument,
+                mode: mode
+            }), channel, svName);
         });
         server.on('whois', function(info) {
-            log('whois info: ' + JSON.stringify(info, null, 4));
+            handleGlobalEvent('whois', null, svName);
         });
         server.on('raw', function(message) {
-            //log('raw: ' + JSON.stringify(message));
+            //console.log('raw: ' + JSON.stringify(message));
         });
         server.on('join', function(channel, nick, message) {
-            log(nick + ' joined ' + channel + ': ' + JSON.stringify(message, null, 4));
-            //console.log('server ' + util.inspect(server));
-
-            // we joined
-            if(nick === server.nick) {
-            } else {
-            }
-
-            sendNickList(svName + ':' + channel, io.sockets);
+            handleChannelEvent('join', nick, null, channel, svName);
+            //sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('part', function(channel, nick, reason, message) {
-            log(nick + ' left ' + channel + ': ' + JSON.stringify(message, null, 4));
+            handleChannelEvent('part', nick, reason, channel, svName);
+            /*
             if(nick === server.nick) {
             } else {
                 sendNickList(svName + ':' + channel, io.sockets);
             }
+            */
         });
         server.on('quit', function(nick, reason, channels, message) {
-            log(nick + ' quit');
+            handleChannelEvent('quit', nick, reason, JSON.stringify(channels), svName);
+            console.log(nick + ' quit');
         });
         server.on('kick', function(channel, nick, by, reason, message) {
-            log(nick + ' kicked from ' + channel);
-            sendNickList(svName + ':' + channel, io.sockets);
+            handleChannelEvent('part', nick, 'kicked from channel: ' + reason, channel, svName);
+            //sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('kill', function(nick, reason, channels, message) {
-            log(nick + ' killed from server');
+            /*
             _.each(channels, function(channel) {
                 sendNickList(svName + ':' + channel, io.sockets);
             });
+            */
+            handleChannelEvent('quit', nick, 'killed from server: ' + reason, JSON.stringify(channels), svName);
         });
         server.on('names', function(channel, nicks) {
-            log('names in ' + channel + ': ' + JSON.stringify(nicks, null, 4));
+            //console.log('names in ' + channel + ': ' + JSON.stringify(nicks, null, 4));
             sendNickList(svName + ':' + channel, io.sockets);
         });
         server.on('topic', function(channel, topic, nick, message) {
-            log('topic in ' + channel + ' changed to: ' + topic);
+            handleChannelEvent('topic', nick, topic, channel, svName);
         });
-        /*
         server.on('error', function(message) {
-            log('server error ' + JSON.stringify(message, null, 4));
+            console.log('server error ' + JSON.stringify(message, null, 4));
+            handleGlobalEvent('error', message, svName);
         });
-        */
     }
 });

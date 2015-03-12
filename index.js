@@ -30,13 +30,13 @@ var io = require('socket.io')(httpServer);
 var getNickList = function(channel) {
     var server = ircServers[chGetSv(channel)];
     if(!server) {
-        socket.emit('bncErr', 'sendNickList: server not found');
+        emitError('server ' + chGetSv(channel) + ' not found', 'sendNickList');
         return;
     }
 
     var c = server.chans[chGetCh(channel)];
     if(!c) {
-        socket.emit('bncErr', 'sendNickList: channel ' + channel + ' not found');
+        emitError('channel ' + channel + ' not found', 'sendNickList');
         return;
     }
 
@@ -91,19 +91,20 @@ io.on('connection', function(socket) {
         var backlog = [];
 
         _.each(chanBacklog, function(messages, channel) {
-            for(var i = messages.length - 1; i >= 0; i--) {
-                backlog.push(messages[i]);
+            if(config.channels.indexOf(channel) !== -1) {
+                var cnt = 0;
+                for(var i = messages.length - 1; i >= 0; i--) {
+                    backlog.push(messages[i]);
+
+                    cnt++;
+                    if(query && query.limit && cnt > query.limit)
+                        break;
+                }
             }
         });
-        /*
-        Messages.aggregate( [
-            { $match: { channel: {$in: getConfigChans(config) } } },
-            { $sort:  { date: 1 } },
-            { $group: { _id: "$channel", messages: { $push: "$$ROOT" } } },
-            { $limit: query.limit }
-        ])
-        */
 
+        socket.emit('messages', backlog);
+        sendAllNickLists(socket);
     });
 
     socket.on('search', function(query) {
@@ -111,7 +112,7 @@ io.on('connection', function(socket) {
         .sort('date')
         .limit(query.limit)
         .exec(function(err, messages) {
-            if(err) socket.emit('bncErr', err);
+            if(err) emitError(err, 'onSearch');
             else socket.emit('results', messages);
         });
     });
@@ -123,7 +124,7 @@ io.on('connection', function(socket) {
     socket.on('join', function(channel) {
         var server = ircServers[chGetSv(channel)];
         if(!server) {
-            socket.emit('bncErr', 'join: server not found');
+            emitError('server not found', 'onJoin');
             return;
         }
 
@@ -138,7 +139,7 @@ io.on('connection', function(socket) {
     socket.on('part', function(channel) {
         var server = ircServers[chGetSv(channel)];
         if(!server) {
-            socket.emit('bncErr', 'part: server not found');
+            emitError('server not found', 'onPart');
             return;
         }
 
@@ -156,12 +157,12 @@ io.on('connection', function(socket) {
     socket.on('message', function(message) {
         var server = ircServers[chGetSv(message.channel)];
         if(!server) {
-            socket.emit('bncErr', 'part: server not found');
+            emitError('server not found', 'onMessage');
             return;
         }
 
         message.nick = server.nick;
-        message.date = new Date().now;
+        message.date = new Date().toISOString();
 
         io.sockets.emit('message', message);
         server.say(chGetCh(message.channel), message.text);
@@ -215,7 +216,7 @@ var handleMessage = function(from, to, text, svName) {
     var msg = {
         nick: from,
         text: text,
-        date: new Date().getTime(),
+        date: new Date().toISOString(),
         channel: channel
     };
     Messages.create(msg);
@@ -279,15 +280,23 @@ var handleRegister = function(message, svName) {
     });
 }
 
+var emitError = function(err, where) {
+    io.sockets.emit('bncErr', {
+        error: err,
+        where: where
+    });
+    console.log('ERROR in ' + where + ':');
+    console.log(err);
+};
+
 var handleChannelJoin = function(channel) {
-    Messages.find({ $match: { channel: channel } })
+    Messages.find({ "channel": channel })
     .limit(config.backlog)
     .sort({ date: 1 })
     .exec(function(err, results) {
         if(err) {
-            io.sockets.emit('bncErr', err);
+            emitError(err, 'handleChannelJoin');
         } else {
-            socket.emit('messages', results);
             chanBacklog[channel] = results;
             io.sockets.emit('backlogAvailable', channel);
         }
@@ -341,6 +350,7 @@ _.each(config.servers, function(serverConfig, svName) {
 
             if(nick === server.nick) {
                 // we joined, get backlog for this channel
+                console.log('joined ' + channel);
                 handleChannelJoin(svName + ':' + channel);
             }
         });

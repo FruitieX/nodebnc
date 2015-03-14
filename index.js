@@ -118,6 +118,16 @@ var getBacklog = function(channel, limit) {
 };
 
 io.on('connection', function(socket) {
+    // emit your nicknames
+    var nicks = {};
+    _.each(ircServers, function(server, svName) {
+        nicks[svName] = ircServers[svName].nick;
+    });
+    socket.emit('nicks', nicks);
+
+    // emit joined channels
+    socket.emit('channels', config.channels);
+
     // state for all channels
     socket.on('getState', function(query) {
         var results = [];
@@ -182,8 +192,8 @@ io.on('connection', function(socket) {
         server.part(chGetCh(channel));
     });
 
-    socket.on('getChannels', function() {
-        socket.emit('channels', config.channels);
+    socket.on('renameChannel', function(info) {
+        // TODO
     });
 
     socket.on('message', function(message) {
@@ -294,10 +304,11 @@ var handleNickChange = function(oldNick, newNick, channels, svName) {
     log.verbose(oldNick + ' changed name to ' + newNick);
 }
 
-var handleRegister = function(message, svName) {
+var handleRegister = function(message, server, svName) {
     log.info('registered: ' + svName);
     io.sockets.emit('registered', {
         svName: svName,
+        nick: server.nick,
         message: message
     });
 
@@ -349,7 +360,7 @@ _.each(config.servers, function(serverConfig, svName) {
         var server = ircServers[svName];
 
         server.on('registered', function(message) {
-            handleRegister(message, svName);
+            handleRegister(message, server, svName);
         });
         server.on('message', function(from, to, text, message) {
             handleMessage(from, svName + ':' + to, text);

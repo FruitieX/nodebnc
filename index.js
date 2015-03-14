@@ -38,16 +38,26 @@ var httpServer = require(config.tls ? 'https': 'http')
 .createServer(config.tls ? options: null).listen(config.port);
 var io = require('socket.io')(httpServer);
 
+// TODO: check where we actually need this insanity, currently it's everywhere
+var lc = function(string) {
+    return _.isString(string) ? string.toLowerCase() : undefined;
+};
+var lcAll = function(strings) {
+    return _.map(strings, function(string) {
+        return string.toLowerCase();
+    });
+};
+
 var getNickList = function(channel) {
     var server = ircServers[chGetSv(channel)];
     if(!server) {
-        emitWarn('server ' + chGetSv(channel) + ' not found', 'sendNickList');
+        emitWarn('server ' + chGetSv(channel) + ' not found', 'getNickList');
         return;
     }
 
-    var c = server.chans[chGetCh(channel)];
+    var c = server.chans[lc(chGetCh(channel))];
     if(!c) {
-        emitWarn('channel ' + channel + ' not found', 'sendNickList');
+        emitWarn('channel ' + channel + ' not found', 'getNickList');
         return;
     }
 
@@ -58,7 +68,7 @@ var sendAllNickLists = function(socket) {
     var nickLists = {};
 
     _.each(config.channels, function(channel) {
-        nickLists[channel] = getNickList(channel);
+        nickLists[lc(channel)] = getNickList(channel);
     });
 
     socket.emit('nickLists', nickLists);
@@ -66,7 +76,7 @@ var sendAllNickLists = function(socket) {
 var sendNickList = function(channel, socket) {
     var nickList = {};
 
-    nickList[channel] = getNickList(channel);
+    nickList[lc(channel)] = getNickList(channel);
     socket.emit('nickLists', nickList);
 };
 
@@ -100,7 +110,7 @@ var short2ch = function(shortChName) {
 */
 
 var getBacklog = function(channel, limit) {
-    var bl = chanBacklog[channel];
+    var bl = chanBacklog[lc(channel)];
     if(!bl)
         return [];
 
@@ -129,6 +139,7 @@ io.on('connection', function(socket) {
     });
 
     socket.on('search', function(query) {
+        query.channel = lc(query.channel);
         Messages.find(_.pick(query, 'channel', 'nick', 'text'))
         .sort('date')
         .limit(query.backlogLimit)
@@ -150,7 +161,7 @@ io.on('connection', function(socket) {
         }
 
         // TODO: check also that channel doesn't exist with key?
-        if(config.channels.indexOf(channel) === -1)
+        if(lcAll(config.channels).indexOf(lc(channel)) === -1)
             config.channels.push(channel);
 
         fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
@@ -176,7 +187,8 @@ io.on('connection', function(socket) {
     });
 
     socket.on('message', function(message) {
-        var server = ircServers[chGetSv(message.channel)];
+        var channel = message.channel;
+        var server = ircServers[chGetSv(channel)];
         if(!server) {
             emitErr('server not found', 'onMessage');
             return;
@@ -186,7 +198,7 @@ io.on('connection', function(socket) {
         message.date = new Date().toISOString();
 
         io.sockets.emit('messages', [message]);
-        server.say(chGetCh(message.channel), message.text);
+        server.say(chGetCh(channel), message.text);
     });
 
     socket.on('raw', function(data) {
@@ -224,6 +236,7 @@ var ChannelEvents = mongoose.model('ChannelEvents', channelEventSchema);
 var GlobalEvents = mongoose.model('GlobalEvents', globalEventSchema);
 
 var appendBacklog = function(backlogType, channel, message) {
+    channel = lc(channel);
     if(!backlogType[channel])
         backlogType[channel] = [];
 
@@ -302,19 +315,18 @@ var emitErr = function(err, where) {
         error: err,
         where: where
     });
-    log.error('in ' + where + ':');
-    log.error(err);
+    log.error('in ' + where + ':', err);
 };
 var emitWarn = function(warn, where) {
     io.sockets.emit('bncWarn', {
         warn: warn,
         where: where
     });
-    log.warn('in ' + where + ':');
-    log.warn(warn);
+    log.warn('in ' + where + ':', warn);
 };
 
 var handleChannelJoin = function(channel) {
+    channel = lc(channel);
     Messages.find({ "channel": channel })
     .limit(config.backlogLimit)
     .sort({ date: 1 })

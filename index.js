@@ -48,16 +48,16 @@ var lcAll = function(strings) {
     });
 };
 
-var getNickList = function(channel) {
-    var server = ircServers[chGetSv(channel)];
+var getNickList = function(chanId) {
+    var server = ircServers[lc(chGetSv(chanId))];
     if(!server) {
-        emitWarn('server ' + chGetSv(channel) + ' not found', 'getNickList');
+        emitWarn('server ' + chGetSv(chanId) + ' not found', 'getNickList');
         return;
     }
 
-    var c = server.chans[lc(chGetCh(channel))];
+    var c = server.chans[lc(chGetCh(chanId))];
     if(!c) {
-        emitWarn('channel ' + channel + ' not found', 'getNickList');
+        emitWarn('channel ' + chanId + ' not found', 'getNickList');
         return;
     }
 
@@ -68,15 +68,15 @@ var sendAllNickLists = function(socket) {
     var nickLists = {};
 
     _.each(config.channels, function(channel) {
-        nickLists[lc(channel)] = getNickList(channel);
+        nickLists[lc(channel.id)] = getNickList(channel.id);
     });
 
     socket.emit('nickLists', nickLists);
 };
-var sendNickList = function(channel, socket) {
+var sendNickList = function(chanId, socket) {
     var nickList = {};
 
-    nickList[lc(channel)] = getNickList(channel);
+    nickList[lc(chanId)] = getNickList(chanId);
     socket.emit('nickLists', nickList);
 };
 
@@ -86,13 +86,13 @@ var getConfigChans = function(config) {
     });
 };
 
-var chGetSv = function(channel) { return channel.split(':')[0]; };
-var chGetCh = function(channel) {
-    var ws = channel.indexOf(' ');
-    ws = ws !== -1 ? ws : channel.length;
-    return channel.substr(0, ws).split(':')[1];
+var chGetSv = function(chanId) { return chanId.split(':')[0]; };
+var chGetCh = function(chanId) {
+    var ws = chanId.indexOf(' ');
+    ws = ws !== -1 ? ws : chanId.length;
+    return chanId.substr(0, ws).split(':')[1];
 };
-var chGetChWithKey = function(channel) { return channel.split(':')[1]; };
+var chGetChWithKey = function(chanId) { return chanId.split(':')[1]; };
 
 /*
 var chIsShort = function(channel) { return channel.split(':').length > 1 };
@@ -109,6 +109,17 @@ var short2ch = function(shortChName) {
 };
 */
 
+var findChanById = function(id) {
+    _.find(config.channels, function(channel) {
+        return lc(channel.id) === lc(id);
+    });
+};
+var getChanIdPos = function(id) {
+    _.findIndex(config.channels, function(channel) {
+        return lc(channel.id) === lc(id);
+    });
+};
+
 var getBacklog = function(channel, limit) {
     var bl = chanBacklog[lc(channel)];
     if(!bl)
@@ -118,7 +129,7 @@ var getBacklog = function(channel, limit) {
 };
 
 io.on('connection', function(socket) {
-    // emit your nicknames
+    // emit your nicknames TODO: re-emit this if a nick changes
     var nicks = {};
     _.each(ircServers, function(server, svName) {
         nicks[svName] = ircServers[svName].nick;
@@ -133,7 +144,7 @@ io.on('connection', function(socket) {
         var results = [];
 
         _.each(config.channels, function(channel) {
-            _.each(getBacklog(channel, query.backlogLimit), function(message) {
+            _.each(getBacklog(channel.id, query.backlogLimit), function(message) {
                 results.push(message);
             });
         });
@@ -164,41 +175,62 @@ io.on('connection', function(socket) {
     });
 
     socket.on('join', function(channel) {
-        var server = ircServers[chGetSv(channel)];
+        var server = ircServers[chGetSv(channel.id)];
         if(!server) {
             emitErr('server not found', 'onJoin');
             return;
         }
 
         // TODO: check also that channel doesn't exist with key?
-        if(lcAll(config.channels).indexOf(lc(channel)) === -1)
-            config.channels.push(channel);
+        if(!findChanById(channel.id)) {
+            config.channels.push({
+                id: channel.id,
+                name: channel.name || channel.id
+            });
+            io.sockets.emit('channels', config.channels);
+        }
 
         fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
-        server.join(chGetChWithKey(channel));
+        server.join(chGetChWithKey(channel.id));
     });
 
     socket.on('part', function(channel) {
-        var server = ircServers[chGetSv(channel)];
+        var server = ircServers[chGetSv(channel.id)];
         if(!server) {
             emitErr('server not found', 'onPart');
             return;
         }
 
-        if(config.channels.indexOf(channel) !== -1)
-            config.channels.splice(channel.channels.indexOf(channel), 1);
+        if(findChanById(channel.id))
+            config.channels.splice(getChanIdPos(channel.id), 1);
 
         fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
-        server.part(chGetCh(channel));
+        server.part(chGetCh(channel.id));
     });
 
     socket.on('renameChannel', function(info) {
-        // TODO
+        var channel = _.find(config.channels, function(channel) {
+            return lc(channel.id) === lc(info.id);
+        });
+        if(channel) {
+            channel.name = info.name;
+            io.sockets.emit('channels', config.channels);
+        }
+    });
+    socket.on('moveChannel', function(info) {
+        var pos = getChanIdPos(info.id);
+        if(pos !== -1) {
+            var channel = config.channels.splice(pos, 1);
+            if(info.pos > pos)
+                info.pos--;
+            config.channels.splice(info.pos, 0, channel[0]);
+            io.sockets.emit('channels', config.channels);
+        }
     });
 
     socket.on('message', function(message) {
         var channel = message.channel;
-        var server = ircServers[chGetSv(channel)];
+        var server = ircServers[chGetSv(channel.id)];
         if(!server) {
             emitErr('server not found', 'onMessage');
             return;
@@ -208,7 +240,7 @@ io.on('connection', function(socket) {
         message.date = new Date().toISOString();
 
         io.sockets.emit('messages', [message]);
-        server.say(chGetCh(channel), message.text);
+        server.say(chGetCh(channel.id), message.text);
     });
 
     socket.on('raw', function(data) {
@@ -314,10 +346,10 @@ var handleRegister = function(message, server, svName) {
 
     // autojoin channels
     var svChans = _.filter(config.channels, function(channel) {
-        return (chGetSv(channel) === svName);
+        return (chGetSv(channel.id) === svName);
     });
     _.each(svChans, function(channel) {
-        ircServers[svName].join(chGetChWithKey(channel));
+        ircServers[svName].join(chGetChWithKey(channel.id));
     });
 }
 
